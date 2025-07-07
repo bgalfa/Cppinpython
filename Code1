@@ -1,0 +1,69 @@
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+
+namespace py = pybind11;
+
+// Just simulate a message for now
+void load_xlsx(const std::string &filename) {
+    py::print("✔ Loading Excel file (done in Python):", filename);
+}
+
+void store_xlsx(const std::string &filename) {
+    py::print("✔ Saving Excel file (done in Python):", filename);
+}
+
+PYBIND11_MODULE(io_module, m) {
+    m.def("load_xlsx", &load_xlsx, "Log loading xlsx");
+    m.def("store_xlsx", &store_xlsx, "Log storing xlsx");
+}
+
+
+setup file
+from setuptools import setup, Extension
+from pybind11.setup_helpers import build_ext
+import pybind11
+
+ext_modules = [
+    Extension(
+        'io_module',
+        ['io.cpp'],
+        include_dirs=[pybind11.get_include()],
+        language='c++'
+    )
+]
+
+
+import io_module
+import pandas as pd
+
+input_file = "input.xlsx"
+output_file = "output.xlsx"
+
+# Step 1: C++ logs the load
+io_module.load_xlsx(input_file)
+
+# Step 2: Python loads Excel data
+df = pd.read_excel(input_file)
+
+# Step 3: Process data
+df["Modified"] = df[df.columns[0]].astype(str) + "_edited"
+
+# Step 4: Python saves Excel
+df.to_excel(output_file, index=False)
+
+# Step 5: C++ logs the save
+io_module.store_xlsx(output_file)
+
+print("✅ Done: Excel data processed and saved.")
+
+setup(
+    name='io_module',
+    ext_modules=ext_modules,
+    cmdclass={'build_ext': build_ext}
+)
+
+
+
+
+
+
