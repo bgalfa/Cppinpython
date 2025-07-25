@@ -1,0 +1,58 @@
+import os
+
+class HeavyDirectoryFinder:
+    def __init__(self, root_path, threshold_mb=100, max_depth=4):
+        self.root_path = root_path
+        self.threshold_bytes = threshold_mb * 1024 * 1024
+        self.max_depth = max_depth
+
+    def get_dir_size(self, path):
+        """Calculate total size of all files directly in the directory (non-recursive)."""
+        total = 0
+        try:
+            for entry in os.scandir(path):
+                if entry.is_file():
+                    total += entry.stat().st_size
+        except (OSError, FileNotFoundError):
+            pass
+        return total
+
+    def get_total_dir_size(self, path):
+        """Recursively calculate total size of all files in directory and subdirectories."""
+        total = 0
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                try:
+                    fp = os.path.join(dirpath, f)
+                    total += os.path.getsize(fp)
+                except (OSError, FileNotFoundError):
+                    pass
+        return total
+
+    def find_heavy_dirs(self, path=None, current_depth=1):
+        """Recursively find and print heavy subdirectories up to max_depth."""
+        if path is None:
+            path = self.root_path
+
+        if current_depth > self.max_depth:
+            return
+
+        try:
+            with os.scandir(path) as entries:
+                subdirs = [entry for entry in entries if entry.is_dir()]
+        except (OSError, FileNotFoundError):
+            return
+
+        for subdir in subdirs:
+            subdir_path = os.path.join(path, subdir.name)
+            size = self.get_total_dir_size(subdir_path)
+
+            if size >= self.threshold_bytes:
+                print(f"{'  ' * current_depth}[Level {current_depth}] Heavy Dir: {subdir_path} - {size / (1024 * 1024):.2f} MB")
+                self.find_heavy_dirs(subdir_path, current_depth + 1)
+
+# ==== USAGE ====
+if __name__ == "__main__":
+    root = "/path/to/start"  # Change this path
+    finder = HeavyDirectoryFinder(root_path=root, threshold_mb=100, max_depth=4)
+    finder.find_heavy_dirs()
