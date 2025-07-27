@@ -1,89 +1,39 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <fstream>
-#include <vector>
-#include <string>
+import os
 
-namespace py = pybind11;
+class DirectorySizeChecker:
+    def __init__(self, root_path, size_threshold_bytes, max_level):
+        self.root_path = root_path
+        self.size_threshold = size_threshold_bytes
+        self.max_level = max_level
 
-std::vector<std::vector<std::string>> load_csv(const std::string &filename) {
-    std::ifstream file(filename);
-    std::vector<std::vector<std::string>> data;
-    std::string line;
+    def get_dir_size(self, path):
+        total_size = 0
+        for dirpath, dirnames, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if os.path.isfile(fp):
+                    total_size += os.path.getsize(fp)
+        return total_size
 
-    while (std::getline(file, line)) {
-        std::vector<std::string> row;
-        size_t pos = 0, prev = 0;
-        while ((pos = line.find(',', prev)) != std::string::npos) {
-            row.push_back(line.substr(prev, pos - prev));
-            prev = pos + 1;
-        }
-        row.push_back(line.substr(prev));
-        data.push_back(row);
-    }
+    def check_directory(self, path, current_level):
+        if current_level > self.max_level:
+            return
 
-    return data;
-}
+        try:
+            entries = os.listdir(path)
+        except PermissionError:
+            print(f"Permission denied: {path}")
+            return
 
-void store_csv(const std::string &filename, const std::vector<std::vector<std::string>> &data) {
-    std::ofstream file(filename);
+        for entry in entries:
+            full_path = os.path.join(path, entry)
+            if os.path.isdir(full_path):
+                dir_size = self.get_dir_size(full_path)
+                if dir_size >= self.size_threshold:
+                    print(f"{'  ' * current_level}[Level {current_level}] {full_path} - {dir_size / (1024**2):.2f} MB")
+                    # Recursively check subdirectories of this one
+                    self.check_directory(full_path, current_level + 1)
 
-    for (const auto &row : data) {
-        for (size_t i = 0; i < row.size(); ++i) {
-            file << row[i];
-            if (i < row.size() - 1)
-                file << ",";
-        }
-        file << "\n";
-    }
-}
-
-PYBIND11_MODULE(io_module, m) {
-    m.def("load_csv", &load_csv, "Read CSV file");
-    m.def("store_csv", &store_csv, "Write CSV file");
-}
-
-
-
-setup file
-from setuptools import setup, Extension
-from pybind11.setup_helpers import build_ext
-import pybind11
-
-ext_modules = [
-    Extension(
-        'io_module',
-        ['io.cpp'],
-        include_dirs=[pybind11.get_include()],
-        language='c++'
-    )
-]
-
-setup(
-    name='io_module',
-    ext_modules=ext_modules,
-    cmdclass={'build_ext': build_ext}
-)
-
-
-import io_module
-import pandas as pd
-
-# Step 1: Load raw data from CSV using C++
-data = io_module.load_csv("input.csv")
-
-# Step 2: Convert to DataFrame for easy processing
-df = pd.DataFrame(data[1:], columns=data[0])  # Skip header in data rows
-
-# Step 3: Modify the data (example: add new column)
-df["Modified"] = df[df.columns[0]].apply(lambda x: f"{x}_edited")
-
-# Step 4: Convert back to list of lists
-header = df.columns.tolist()
-data_out = df.values.tolist()
-final_data = [header] + data_out
-
-# Step 5: Save the data using C++
-io_module.store_csv("output.csv", final_data)
-
-print("✅ Done: Data loaded by C++, processed in Python, saved by C++")
+    def run(self):
+        print(f"Checking directories under: {self.root_path}\n")
+        self.check_directory(self.root_path, 1)
