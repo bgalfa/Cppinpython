@@ -1,58 +1,97 @@
 import os
+import threading
+from queue import Queue
+from tabulate import tabulate
+from openpyxl import Workbook
 
-def bytes_to_readable(size_in_bytes):
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_in_bytes < 1024:
-            return f"{size_in_bytes:.2f} {unit}"
-        size_in_bytes /= 1024
-    return f"{size_in_bytes:.2f} PB"
+class FolderSizeAnalyzer:
+    def __init__(self, root_dir, max_level=4, size_threshold_gb=0.1, export_excel=False):
+        self.root_dir = root_dir
+        self.max_level = max_level
+        self.size_threshold = size_threshold_gb * (1024 ** 3)  # GB to bytes
+        self.export_excel = export_excel
+        self.result = []
+        self.lock = threading.Lock()
 
-def get_directory_tree(path, min_size=0, max_level=None, level=0):
-    total_size = 0
-    tree = {
-        "path": path,
-        "name": os.path.basename(path) or path,
-        "size": 0,
-        "children": []
-    }
+    def get_folder_size(self, path):
+        total = 0
+        for dirpath, dirnames, filenames in os.walk(path, onerror=lambda e: None):
+            for f in filenames:
+                try:
+                    fp = os.path.join(dirpath, f)
+                    total += os.path.getsize(fp)
+                except Exception:
+                    continue
+        return total
 
-    if max_level is not None and level > max_level:
-        return tree, 0
+    def analyze_directory(self, path, current_level):
+        if current_level > self.max_level:
+            return
 
-    try:
-        for entry in os.scandir(path):
-            if entry.is_file(follow_symlinks=False):
-                file_size = entry.stat(follow_symlinks=False).st_size
-                total_size += file_size
-            elif entry.is_dir(follow_symlinks=False):
-                subtree, subsize = get_directory_tree(
-                    entry.path, min_size, max_level, level + 1
-                )
-                if subsize >= min_size:
-                    tree["children"].append(subtree)
-                total_size += subsize
-    except PermissionError:
-        return tree, 0  # Skip folders we can't access
+        try:
+            entries = os.listdir(path)
+        except Exception:
+            return
 
-    tree["size"] = total_size
-    return tree, total_size
+        subdirs = [os.path.join(path, d) for d in entries if os.path.isdir(os.path.join(path, d))]
+        for subdir in subdirs:
+            t = threading.Thread(target=self.process_directory, args=(subdir, current_level + 1))
+            t.start()
 
-def format_tree_output(tree, level=0):
-    indent = "  " * level
-    size_str = bytes_to_readable(tree["size"])
-    print(f"{indent}{tree['name']} - {size_str}")
-    for child in sorted(tree["children"], key=lambda x: x["size"], reverse=True):
-        format_tree_output(child, level + 1)
+    def process_directory(self, path, level):
+        size = self.get_folder_size(path)
+        if size >= self.size_threshold:
+            with self.lock:
+                self.result.append({
+                    "Level": level,
+                    "Directory": path,
+                    "Size (GB)": round(size / (1024 ** 3), 2)
+                })
+        self.analyze_directory(path, level)
 
-# 🚀 Example Usage:
+    def run(self):
+        print(f"Scanning '{self.root_dir}' up to level {self.max_level}...\n")
+        self.process_directory(self.root_dir, 1)
+        main_thread = threading.current_thread()
+        for t in threading.enumerate():
+            if t is not main_thread:
+                t.join()
+
+        self.result.sort(key=lambda x: x["Size (GB)"], reverse=True)
+        print(tabulate(self.result, headers="keys"))
+
+        if self.export_excel:
+            self.export_to_excel()
+
+    def export_to_excel(self):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Folder Sizes"
+        ws.append(["Level", "Directory", "Size (GB)"])
+
+        for entry in self.result:
+            ws.append([entry["Level"], entry["Directory"], entry["Size (GB)"]])
+
+        file_path = "TreeSize_Report.xlsx"
+        wb.save(file_path)
+        print(f"\n📁 Report saved to '{file_path}'.")
+
+
 if __name__ == "__main__":
-    root_path = "/path/to/your/directory"
-    min_display_size = 100 * 1024 * 1024  # only show directories > 100MB
-    max_depth = None  # or set like 4
+    import argparse
 
-    directory_tree, total = get_directory_tree(
-        root_path,
-        min_size=min_display_size,
-        max_level=max_depth
+    parser = argparse.ArgumentParser(description="TreeSize-like folder size analyzer.")
+    parser.add_argument("directory", help="Root directory to scan")
+    parser.add_argument("--level", type=int, default=4, help="Maximum directory depth to scan")
+    parser.add_argument("--threshold", type=float, default=0.1, help="Size threshold in GB")
+    parser.add_argument("--excel", action="store_true", help="Export result to Excel")
+
+    args = parser.parse_args()
+
+    analyzer = FolderSizeAnalyzer(
+        root_dir=args.directory,
+        max_level=args.level,
+        size_threshold_gb=args.threshold,
+        export_excel=args.excel
     )
-    format_tree_output(directory_tree)
+    analyzer.run()
