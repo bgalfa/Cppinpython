@@ -1,58 +1,118 @@
 import os
+import time
+import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tabulate import tabulate
 
-class HeavyDirectoryFinder:
-    def __init__(self, root_path, threshold_mb=100, max_depth=4):
-        self.root_path = root_path
-        self.threshold_bytes = threshold_mb * 1024 * 1024
-        self.max_depth = max_depth
+class FolderSizeAnalyzer:
+    def __init__(self, root_dir, max_level=4, size_threshold_gb=1, export_csv=False, max_workers=8):
+        self.root_dir = root_dir
+        self.max_level = max_level
+        self.size_threshold = size_threshold_gb * (1024 ** 3)  # GB to bytes
+        self.export_csv = export_csv
+        self.max_workers = max_workers
+        self.results = []
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)  # shared pool
 
-    def get_dir_size(self, path):
-        """Calculate total size of all files directly in the directory (non-recursive)."""
+    def get_folder_size(self, path):
+        """Faster recursive size calculation using scandir with parallel subdir scanning."""
         total = 0
+        subdirs = []
+
         try:
             for entry in os.scandir(path):
-                if entry.is_file():
-                    total += entry.stat().st_size
-        except (OSError, FileNotFoundError):
-            pass
-        return total
-
-    def get_total_dir_size(self, path):
-        """Recursively calculate total size of all files in directory and subdirectories."""
-        total = 0
-        for dirpath, _, filenames in os.walk(path):
-            for f in filenames:
                 try:
-                    fp = os.path.join(dirpath, f)
-                    total += os.path.getsize(fp)
-                except (OSError, FileNotFoundError):
-                    pass
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                    elif entry.is_dir(follow_symlinks=False):
+                        subdirs.append(entry.path)
+                except Exception:
+                    continue
+        except Exception:
+            return 0
+
+        # Process subdirectories in parallel
+        if subdirs:
+            futures = [self.executor.submit(self.get_folder_size, subdir) for subdir in subdirs]
+            for f in as_completed(futures):
+                try:
+                    total += f.result()
+                except Exception:
+                    continue
+
         return total
 
-    def find_heavy_dirs(self, path=None, current_depth=1):
-        """Recursively find and print heavy subdirectories up to max_depth."""
-        if path is None:
-            path = self.root_path
+    def process_directory(self, path, level):
+        """Process a single directory and return its result if it exceeds threshold."""
+        size = self.get_folder_size(path)
+        if size >= self.size_threshold:
+            return {
+                "Level": level,
+                "Directory": path,
+                "Size (GB)": round(size / (1024 ** 3), 2)
+            }
+        return None
 
-        if current_depth > self.max_depth:
-            return
-
+    def analyze_directory(self, path, current_level):
+        """Collect subdirectories up to max_level."""
+        if current_level > self.max_level:
+            return []
         try:
-            with os.scandir(path) as entries:
-                subdirs = [entry for entry in entries if entry.is_dir()]
-        except (OSError, FileNotFoundError):
-            return
+            return [
+                (os.path.join(path, d), current_level)
+                for d in os.listdir(path)
+                if os.path.isdir(os.path.join(path, d))
+            ]
+        except Exception:
+            return []
 
-        for subdir in subdirs:
-            subdir_path = os.path.join(path, subdir.name)
-            size = self.get_total_dir_size(subdir_path)
+    def run(self):
+        print(f"Scanning {self.root_dir} up to level {self.max_level}...\n")
+        work_queue = [(self.root_dir, 1)]
+        futures = []
 
-            if size >= self.threshold_bytes:
-                print(f"{'  ' * current_depth}[Level {current_depth}] Heavy Dir: {subdir_path} - {size / (1024 * 1024):.2f} MB")
-                self.find_heavy_dirs(subdir_path, current_depth + 1)
+        while work_queue:
+            path, level = work_queue.pop()
+            futures.append(self.executor.submit(self.process_directory, path, level))
 
-# ==== USAGE ====
+            # Queue subdirectories for further processing
+            for subdir, lvl in self.analyze_directory(path, level + 1):
+                work_queue.append((subdir, lvl))
+
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                self.results.append(result)
+
+        # Sort results by size
+        self.results.sort(key=lambda x: x["Size (GB)"], reverse=True)
+
+        # Display results
+        print(tabulate(self.results, headers="keys", tablefmt="grid"))
+
+        if self.export_csv:
+            self.export_to_csv(self.results)
+
+        self.executor.shutdown(wait=True)
+
+    def export_to_csv(self, results):
+        file_path = "Directory_Report.csv"
+        with open(file_path, mode='w', newline='') as file:
+            writer = csv.DictWriter(file, fieldnames=["Level", "Directory", "Size (GB)"])
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"\nReport saved to {file_path}")
+
+
 if __name__ == "__main__":
-    root = "/path/to/start"  # Change this path
-    finder = HeavyDirectoryFinder(root_path=root, threshold_mb=100, max_depth=4)
-    finder.find_heavy_dirs()
+    start = time.time()
+    analyzer = FolderSizeAnalyzer(
+        root_dir=r"C:\Users\h59341",
+        size_threshold_gb=1,
+        max_level=4,
+        export_csv=True,
+        max_workers=8  # tune based on CPU & disk speed
+    )
+    analyzer.run()
+    end = time.time()
+    print(f"Processing time: {(end - start) / 60:.2f} minutes")
