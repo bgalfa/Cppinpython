@@ -1,0 +1,95 @@
+import polars as pl
+import pandas as pd
+from typing import List
+
+
+# -------------------------------------------------
+# File reader (CSV / Excel → LazyFrame)
+# -------------------------------------------------
+def read_file(path: str) -> pl.LazyFrame:
+    path = path.lower()
+    if path.endswith(".csv"):
+        return pl.scan_csv(path)
+    elif path.endswith((".xlsx", ".xls")):
+        return pl.read_excel(path).lazy()
+    else:
+        raise ValueError("Unsupported file type")
+
+
+# -------------------------------------------------
+# Inline normalization (NO aliases created)
+# -------------------------------------------------
+def normalize(col: pl.Expr) -> pl.Expr:
+    return (
+        pl.when(col.is_null())
+        .then(None)
+        .when(col.is_utf8())
+        .then(col.str.strip().replace("", None))
+        .when(col.is_numeric())
+        .then(col.cast(pl.Float64))
+        .when(col.is_temporal())
+        .then(col.cast(pl.Datetime("us")))
+        .otherwise(col)
+    )
+
+
+# -------------------------------------------------
+# Main reconciliation function
+# -------------------------------------------------
+def reconcile_files(
+    file1: str,
+    file2: str,
+    pk_cols: List[str]
+) -> pd.DataFrame:
+
+    df1 = read_file(file1)
+    df2 = read_file(file2)
+
+    # Identify data columns
+    data_cols = [c for c in df1.columns if c not in pk_cols]
+
+    # Join on primary keys
+    joined = df1.join(
+        df2,
+        on=pk_cols,
+        how="inner",
+        suffix="_after"
+    )
+
+    # Build mismatch details (NO helper columns)
+    diffs_expr = pl.concat_list([
+        pl.when(
+            ~normalize(pl.col(c)).eq_missing(
+                normalize(pl.col(f"{c}_after"))
+            )
+        )
+        .then(
+            pl.struct(
+                pl.lit(c).alias("column"),
+                pl.col(c).alias("before"),
+                pl.col(f"{c}_after").alias("after"),
+            )
+        )
+        .otherwise(None)
+        for c in data_cols
+    ]).list.drop_nulls()
+
+    # Final audit table
+    audit = (
+        joined
+        .with_columns(
+            diffs=diffs_expr,
+            mismatch_columns=diffs_expr.list.eval(
+                pl.element().struct.field("column")
+            )
+        )
+        .filter(pl.col("diffs").list.len().fill_null(0) > 0)
+        .select(
+            *pk_cols,
+            pl.col("mismatch_columns").alias("Mismatch_Columns"),
+            pl.col("diffs").alias("Mismatch_Details"),
+        )
+    )
+
+    # Return pandas DataFrame
+    return audit.collect().to_pandas()
