@@ -20,17 +20,43 @@ def read_file(path: str) -> pl.LazyFrame:
 # Inline normalization (NO aliases created)
 # -------------------------------------------------
 def normalize(col: pl.Expr) -> pl.Expr:
+import polars as pl
+
+def normalize(col: pl.Expr) -> pl.Expr:
+    s = col.cast(pl.Utf8).str.strip()
+
     return (
-        pl.when(col.is_null())
+        pl.when(s.is_null() | (s == ""))
         .then(None)
-        .when(col.is_utf8())
-        .then(col.str.strip().replace("", None))
-        .when(col.is_numeric())
-        .then(col.cast(pl.Float64))
-        .when(col.is_temporal())
-        .then(col.cast(pl.Datetime("us")))
-        .otherwise(col)
+
+        # ---------- NUMERIC NORMALIZATION ----------
+        .when(
+            s.str.contains(r"^[+-]?\d+(\.\d+)?$")
+        )
+        .then(
+            s.cast(pl.Float64)
+             .round(6)               # numeric tolerance
+             .cast(pl.Utf8)
+        )
+
+        # ---------- DATE NORMALIZATION ----------
+        .when(
+            s.str.contains(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$") |
+            s.str.contains(r"^\d{4}-\d{2}-\d{2}")
+        )
+        .then(
+            pl.coalesce(
+                s.str.strptime(pl.Date, "%Y-%m-%d", strict=False),
+                s.str.strptime(pl.Date, "%d-%m-%Y", strict=False),
+                s.str.strptime(pl.Date, "%d/%m/%Y", strict=False),
+                s.str.strptime(pl.Date, "%m/%d/%Y", strict=False),
+            ).cast(pl.Utf8)
+        )
+
+        # ---------- STRING FALLBACK ----------
+        .otherwise(s)
     )
+
 
 
 # -------------------------------------------------
